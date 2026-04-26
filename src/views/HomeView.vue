@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 
 interface Format {
   id: string
@@ -26,6 +26,28 @@ const loading = ref(false)
 const error = ref('')
 const videoInfo = ref<VideoInfo | null>(null)
 const downloadingId = ref<string | null>(null)
+
+const displayFormats = computed(() => {
+  if (!videoInfo.value) return []
+  const map = new Map<string, Format>()
+  for (const f of videoInfo.value.formats) {
+    if (f.ext === 'mhtml') continue
+    const key = f.resolution
+    const existing = map.get(key)
+    if (!existing) {
+      map.set(key, f)
+    } else {
+      const isMp4 = f.ext === 'mp4'
+      const existingIsMp4 = existing.ext === 'mp4'
+      if (isMp4 && !existingIsMp4) {
+        map.set(key, f)
+      } else if (isMp4 === existingIsMp4 && (f.filesize ?? 0) > (existing.filesize ?? 0)) {
+        map.set(key, f)
+      }
+    }
+  }
+  return Array.from(map.values())
+})
 
 function formatDuration(seconds: number): string {
   const h = Math.floor(seconds / 3600)
@@ -66,27 +88,43 @@ async function fetchFormats() {
   }
 }
 
-function download(format: Format) {
+async function download(format: Format) {
   if (!videoInfo.value) return
   downloadingId.value = format.id
+  const title = videoInfo.value.title
+
+  // Video-only formats: merge with best available audio stream
+  const isVideoOnly = formatType(format) === 'video'
+  const effectiveFormatId = isVideoOnly ? `${format.id}+bestaudio` : format.id
+  const effectiveExt = isVideoOnly ? 'mp4' : format.ext
 
   const params = new URLSearchParams({
     url: url.value.trim(),
-    formatId: format.id,
-    filename: videoInfo.value.title,
-    ext: format.ext,
+    formatId: effectiveFormatId,
+    filename: title,
+    ext: effectiveExt,
   })
 
-  const a = document.createElement('a')
-  a.href = `/api/download?${params}`
-  a.download = `${videoInfo.value.title}.${format.ext}`
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-
-  setTimeout(() => {
+  try {
+    const response = await fetch(`/api/download?${params}`)
+    if (!response.ok) {
+      downloadingId.value = null
+      return
+    }
+    // Headers received = download stream has started
     downloadingId.value = null
-  }, 2000)
+    const blob = await response.blob()
+    const blobUrl = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = blobUrl
+    a.download = `${title}.${effectiveExt}`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000)
+  } catch {
+    downloadingId.value = null
+  }
 }
 </script>
 
@@ -114,6 +152,14 @@ function download(format: Format) {
 
     <p v-if="error" class="error">{{ error }}</p>
 
+    <Transition name="fade">
+      <div v-if="loading" class="loading-state">
+        <div class="loading-icon">▶</div>
+        <div class="loading-bars"><span /><span /><span /><span /><span /></div>
+        <p>Récupération des formats…</p>
+      </div>
+    </Transition>
+
     <div v-if="videoInfo" class="results">
       <div class="video-info">
         <img :src="videoInfo.thumbnail" :alt="videoInfo.title" class="thumbnail" />
@@ -139,7 +185,7 @@ function download(format: Format) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="f in videoInfo.formats" :key="f.id">
+          <tr v-for="f in displayFormats" :key="f.id">
             <td>
               <span class="ext-badge">{{ f.ext.toUpperCase() }}</span>
             </td>
@@ -148,7 +194,7 @@ function download(format: Format) {
               <span class="type-badge" :class="formatType(f)">{{ formatType(f) }}</span>
             </td>
             <td class="size">{{ formatSize(f.filesize) }}</td>
-            <td class="fps">{{ f.fps ?? '—' }}</td>
+            <td class="fps">{{ formatType(f) !== 'audio' ? (f.fps ?? '—') : '—' }}</td>
             <td>
               <button
                 class="btn-download"
@@ -164,6 +210,10 @@ function download(format: Format) {
         </tbody>
       </table>
     </div>
+
+    <footer class="footer">
+      <p>Fait par <span class="author">Young Solver</span></p>
+    </footer>
   </main>
 </template>
 
@@ -171,7 +221,9 @@ function download(format: Format) {
 main {
   max-width: 900px;
   margin: 0 auto;
-  padding: 2rem 1.5rem 4rem;
+  padding: 2rem 1rem 4rem;
+  box-sizing: border-box;
+  width: 100%;
 }
 
 .hero {
@@ -186,7 +238,7 @@ main {
 }
 
 h1 {
-  font-size: 2rem;
+  font-size: clamp(1.5rem, 5vw, 2rem);
   font-weight: 700;
   margin: 0 0 0.5rem;
 }
@@ -284,6 +336,7 @@ h1 {
   object-fit: cover;
   border-radius: 6px;
   background: #000;
+  flex-shrink: 0;
 }
 
 .video-meta h2 {
@@ -405,7 +458,146 @@ h1 {
   cursor: not-allowed;
 }
 
+/* Loading state */
+.loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  padding: 3rem 1rem;
+  text-align: center;
+  color: var(--color-text);
+  opacity: 0.75;
+  font-size: 0.95rem;
+}
+
+.loading-icon {
+  font-size: 2.5rem;
+  color: #ff0000;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.loading-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 28px;
+}
+
+.loading-bars span {
+  display: block;
+  width: 5px;
+  border-radius: 3px;
+  background: #ff0000;
+  animation: bar 1s ease-in-out infinite;
+}
+
+.loading-bars span:nth-child(1) {
+  animation-delay: 0s;
+  height: 40%;
+}
+.loading-bars span:nth-child(2) {
+  animation-delay: 0.1s;
+  height: 70%;
+}
+.loading-bars span:nth-child(3) {
+  animation-delay: 0.2s;
+  height: 100%;
+}
+.loading-bars span:nth-child(4) {
+  animation-delay: 0.3s;
+  height: 70%;
+}
+.loading-bars span:nth-child(5) {
+  animation-delay: 0.4s;
+  height: 40%;
+}
+
+@keyframes bar {
+  0%,
+  100% {
+    transform: scaleY(0.4);
+    opacity: 0.5;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.25s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+.footer {
+  text-align: center;
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--color-border);
+  font-size: 0.85rem;
+  opacity: 0.6;
+}
+
+.footer .author {
+  font-weight: 600;
+  opacity: 1;
+}
+
+/* ── Tablet (641px – 1024px) ── */
+@media (min-width: 641px) and (max-width: 1024px) {
+  main {
+    padding: 2rem 1.5rem 4rem;
+  }
+
+  .formats-table {
+    font-size: 0.85rem;
+  }
+}
+
+/* ── Mobile (≤ 640px) ── */
 @media (max-width: 640px) {
+  main {
+    padding: 1.25rem 0.75rem 3rem;
+  }
+
+  .hero {
+    margin-bottom: 1.75rem;
+  }
+
+  .hero-icon {
+    font-size: 2.25rem;
+  }
+
+  .subtitle {
+    font-size: 0.9rem;
+  }
+
+  .search-bar {
+    flex-direction: column;
+  }
+
+  .btn-search {
+    width: 100%;
+    min-width: unset;
+  }
+
   .video-info {
     flex-direction: column;
   }
@@ -416,9 +608,24 @@ h1 {
     min-width: unset;
   }
 
+  .formats-table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    font-size: 0.82rem;
+  }
+
+  /* Hide FPS and Size columns on small screens */
+  .formats-table th:nth-child(4),
+  .formats-table td:nth-child(4),
   .formats-table th:nth-child(5),
   .formats-table td:nth-child(5) {
     display: none;
+  }
+
+  .btn-download {
+    padding: 0.35rem 0.65rem;
+    font-size: 0.78rem;
   }
 }
 </style>
