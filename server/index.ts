@@ -69,6 +69,20 @@ async function getYtDlp(): Promise<typeof YTDlpWrap.prototype> {
 
 const ytDlpPromise = getYtDlp()
 
+function isYouTube(url: string): boolean {
+  return /youtube\.com|youtu\.be/.test(url)
+}
+
+/** Extra yt-dlp args to bypass YouTube bot detection */
+function youtubeArgs(): string[] {
+  // Use the TV embedded client which is less restricted than the web client
+  const args = ['--extractor-args', 'youtube:player_client=tv_embedded,web_embedded']
+  // Pass cookies from the system browser for authentication
+  const browser = process.platform === 'darwin' ? 'safari' : 'chrome'
+  args.push('--cookies-from-browser', browser)
+  return args
+}
+
 const app = express()
 app.use(cors())
 app.use(express.json())
@@ -83,7 +97,8 @@ app.get('/api/formats', async (req, res) => {
 
   try {
     const ytDlp = await ytDlpPromise
-    const info = await ytDlp.getVideoInfo(url)
+    const extraArgs = isYouTube(url) ? youtubeArgs() : []
+    const info = await ytDlp.getVideoInfo(url, extraArgs)
 
     const formats = (info.formats as any[])
       .filter((f) => f.url) // only playable formats
@@ -143,7 +158,8 @@ app.get('/api/download', async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="${safeName}.${ext}"`)
     res.setHeader('Content-Type', 'application/octet-stream')
 
-    const stream = ytDlp.execStream([url, '-f', formatId, '-o', '-'])
+    const extraArgs = isYouTube(url) ? youtubeArgs() : []
+    const stream = ytDlp.execStream([url, '-f', formatId, ...extraArgs, '-o', '-'])
 
     stream.on('error', (err) => {
       console.error('Stream error:', err)
